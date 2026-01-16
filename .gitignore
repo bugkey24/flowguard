@@ -1,0 +1,31 @@
+# --- Binaries & OS Specific ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+Thumbs.db
+.DS_Store
+
+# --- Golang Specific ---
+vendor/
+
+# --- IDE & Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- SAFETY FILTER ---
+*.msi
+*.zip
+*.rar
+SelfishNetV3Setup.msi
+
+# User Data
+devices.json
+debug.log
+*.pcap
+*.pcapng
