@@ -27,16 +27,24 @@ func GetAvailableInterfaces() ([]NetworkInterface, error) {
 
 	var ifaces []NetworkInterface
 	for _, d := range devices {
+		lowerName := strings.ToLower(d.Name)
+		if strings.HasPrefix(lowerName, "docker") || 
+		   strings.HasPrefix(lowerName, "br-") || 
+		   strings.HasPrefix(lowerName, "veth") ||
+		   strings.HasPrefix(lowerName, "lo") { continue }
+
+		desc := d.Description
+		if desc == "" { desc = d.Name }
+
 		for _, address := range d.Addresses {
 			ip := address.IP.To4()
-			if ip == nil || ip.IsLoopback() || strings.HasPrefix(ip.String(), "169.254") { continue }
+			if ip == nil || ip.IsLoopback() || strings.HasPrefix(ip.String(), "169.254") || strings.HasPrefix(ip.String(), "127.") { continue }
 			
 			mac, _ := getMacAddrByIP(ip)
-			
 			if len(ip) == 4 {
 				ifaces = append(ifaces, NetworkInterface{
 					Name:        d.Name,
-					Description: d.Description,
+					Description: desc,
 					IP:          ip,
 					MAC:         mac,
 				})
@@ -54,17 +62,11 @@ type Scanner struct {
 
 func NewScanner(iface NetworkInterface) (*Scanner, error) {
 	if len(iface.IP) == 0 { return nil, fmt.Errorf("invalid interface") }
-	
 	if len(iface.MAC) == 0 {
 		mac, err := getMacAddrByIP(iface.IP)
 		if err == nil { iface.MAC = mac }
 	}
-
-	return &Scanner{
-		InterfaceName: iface.Name,
-		MyIP:          iface.IP,
-		MyMAC:         iface.MAC,
-	}, nil
+	return &Scanner{InterfaceName: iface.Name, MyIP: iface.IP, MyMAC: iface.MAC}, nil
 }
 
 func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
@@ -79,39 +81,61 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 	results := make(chan models.Device, 255)
 	var wg sync.WaitGroup
 
+	// LISTENER (IPv4 ARP & IPv6 Traffic)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		src := gopacket.NewPacketSource(handle, handle.LinkType())
-		packetChan := src.Packets()
+		in := src.Packets()
 		
 		for {
 			select {
-			case <-ctx.Done():
-				return
-			case packet, ok := <-packetChan:
-				if !ok { return } // Channel closed
+			case <-ctx.Done(): return
+			case packet, ok := <-in:
+				if !ok { return }
 				
+				// 1. Check ARP (IPv4 Discovery)
 				arpLayer := packet.Layer(layers.LayerTypeARP)
-				if arpLayer == nil { continue }
-				arp, _ := arpLayer.(*layers.ARP)
+				if arpLayer != nil {
+					arp, _ := arpLayer.(*layers.ARP)
+					if arp.Operation == layers.ARPReply {
+						senderIP := net.IP(arp.SourceProtAddress)
+						senderMAC := net.HardwareAddr(arp.SourceHwAddress)
+						if senderIP.Equal(s.MyIP) { continue }
+						
+						select {
+						case results <- models.Device{IP: senderIP, MAC: senderMAC}:
+						case <-ctx.Done(): return
+						}
+					}
+				}
 
-				if arp.Operation == layers.ARPReply {
-					senderIP := net.IP(arp.SourceProtAddress)
-					senderMAC := net.HardwareAddr(arp.SourceHwAddress)
-					
-					if senderIP.Equal(s.MyIP) { continue }
-					
+				// 2. Check IPv6 (Passive Discovery)
+
+				ip6Layer := packet.Layer(layers.LayerTypeIPv6)
+				ethLayer := packet.Layer(layers.LayerTypeEthernet)
+				
+				if ip6Layer != nil && ethLayer != nil {
+					ip6, _ := ip6Layer.(*layers.IPv6)
+					eth, _ := ethLayer.(*layers.Ethernet)
+
+					if ip6.SrcIP.IsMulticast() || ip6.SrcIP.IsUnspecified() { continue }
+					if bytesEqual(eth.SrcMAC, s.MyMAC) { continue }
+
 					select {
-					case results <- models.Device{IP: senderIP, MAC: senderMAC, Vendor: ""}:
-					case <-ctx.Done():
-						return
+					case results <- models.Device{
+						IP: nil,
+						IPv6: ip6.SrcIP, 
+						MAC: eth.SrcMAC,
+					}:
+					case <-ctx.Done(): return
 					}
 				}
 			}
 		}
 	}()
 
+	// BROADCASTER (ARP REQUEST)
 	go func() {
 		for attempt := 0; attempt < 3; attempt++ {
 			for i := 1; i < 255; i++ {
@@ -123,7 +147,7 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 					targetIP[3] = byte(i)
 					if targetIP.Equal(s.MyIP) { continue }
 					sendARPRequest(handle, s.MyMAC, s.MyIP, targetIP)
-					time.Sleep(1 * time.Millisecond)
+					time.Sleep(2 * time.Millisecond)
 				}
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -134,10 +158,31 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 	wg.Wait()
 	close(results)
 
-	uniqueMap := make(map[string]models.Device)
-	for d := range results { uniqueMap[d.IP.String()] = d }
+	// DEDUPLICATE RESULTS (BOTH IPv4 & IPv6)
+	deviceMap := make(map[string]*models.Device)
+	
+	for d := range results {
+		key := d.MAC.String()
+		if _, exists := deviceMap[key]; !exists {
+			if d.IP != nil {
+				deviceMap[key] = &d
+			} else {
+				deviceMap[key] = &d 
+			}
+		} else {
+			// Update Data
+			existing := deviceMap[key]
+			if d.IP != nil { existing.IP = d.IP } // Update IPv4
+			if len(d.IPv6) > 0 { existing.IPv6 = d.IPv6 } // Update IPv6
+		}
+	}
+
 	var devices []models.Device
-	for _, d := range uniqueMap { devices = append(devices, d) }
+	for _, d := range deviceMap {
+		if len(d.IP) > 0 {
+			devices = append(devices, *d)
+		}
+	}
 	return devices, nil
 }
 
@@ -157,4 +202,10 @@ func getMacAddrByIP(ip net.IP) (net.HardwareAddr, error) {
 		for _, addr := range addrs { if strings.Contains(addr.String(), ip.String()) { return i.HardwareAddr, nil } }
 	}
 	return nil, fmt.Errorf("MAC not found")
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) { return false }
+	for i, v := range a { if v != b[i] { return false } }
+	return true
 }

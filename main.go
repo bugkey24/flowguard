@@ -62,6 +62,7 @@ type model struct {
 
 	session     *models.SessionManager
 	spoofer     *core.Spoofer
+	spoofer6    *core.Spoofer6
 	forwarder   *core.Forwarder
 	stopChan    chan struct{}
 	
@@ -84,6 +85,7 @@ type scanResultMsg struct {
 }
 type engineReadyMsg struct {
 	spoofer   *core.Spoofer
+	spoofer6  *core.Spoofer6
 	forwarder *core.Forwarder
 	stopChan  chan struct{}
 	err       error
@@ -279,9 +281,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTable()
 		return m, nil
 
-	case engineReadyMsg:
+case engineReadyMsg:
 		if msg.err != nil { m.err = msg.err; return m, nil }
-		m.spoofer, m.forwarder, m.stopChan = msg.spoofer, msg.forwarder, msg.stopChan
+		m.spoofer = msg.spoofer
+		m.spoofer6 = msg.spoofer6
+		m.forwarder = msg.forwarder
+		m.stopChan = msg.stopChan
 		
 		// [GATEWAY LOCKING]
 		m.ifaceIndex = getInterfaceIndex(m.scanner.MyIP)
@@ -291,7 +296,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		go m.spoofer.Start()
+		go m.spoofer6.Start()
 		go m.forwarder.StartForwarding(m.stopChan)
+		
 		m.state = "running"
 		return m, tickCmd()
 
@@ -352,6 +359,14 @@ func (m *model) refreshTable() {
 		if d.IP.Equal(m.gatewayIP) { name = "[ROUTER] " + name }
 		if d.IP.Equal(m.scanner.MyIP) { name = "[YOU] " + name }
 
+		if len(d.IPv6) > 0 {
+			name += " (v6)"
+		} else {
+			if t := m.session.GetTarget(mac); t != nil && len(t.IPv6) > 0 {
+				name += " (v6)"
+			}
+		}
+
 		downStr, upStr, statusStr := "-", "-", "Idle"
 
 		if t := m.session.GetTarget(mac); t != nil {
@@ -367,7 +382,7 @@ func (m *model) refreshTable() {
 	if currentCursor < len(rows) { m.table.SetCursor(currentCursor) }
 }
 
-// [UPDATED] Helper Logic di main.go
+// [UPDATED] Helper Logic
 func (m *model) activateAllDevices() {
 	for _, d := range m.devices {
 		if !isSafeDevice(&d, *m) { 
@@ -376,19 +391,18 @@ func (m *model) activateAllDevices() {
 	}
 }
 
-// [UPDATED] Helper Logic di main.go
+// [UPDATED] Helper Logic
 
 func (m *model) addToSession(d *models.Device) {
 	mac := d.MAC.String()
-	// 1. Tambahkan ke Session
+	// 1. Add to Session Manager
 	if m.session.GetTarget(mac) == nil {
 		name := m.aliases[mac]
 		if name == "" { name = d.Vendor }
 		m.session.AddTarget(*d, name)
 	}
 
-	// 2. [BURST ATTACK] Paksa racuni target SEKARANG JUGA
-	// Jangan tunggu ticker loop berikutnya.
+	// 2. [BURST ATTACK]
 	if m.spoofer != nil {
 		t := m.session.GetTarget(mac)
 		if t != nil {
@@ -467,23 +481,32 @@ func scanNetworkCmd(iface core.NetworkInterface) tea.Cmd {
 func setupEngineCmd(scanner *core.Scanner, gwIP net.IP, session *models.SessionManager) tea.Cmd {
 	return func() tea.Msg {
 		gwMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} 
+		
+		// 1. Setup IPv4 Spoofer
 		spoofer := core.NewSpoofer(scanner.InterfaceName, scanner.MyMAC, scanner.MyIP, gwIP, gwMAC, session)
 		
-		// 1. Promiscuous TRUE Handle for Forwarder
-		fHandle, err := pcap.OpenLive(scanner.InterfaceName, 65536, true, pcap.BlockForever)
+		// 2. Setup Handle
+		fHandle, err := pcap.OpenLive(scanner.InterfaceName, 1048576, true, pcap.BlockForever)
 		if err != nil { return engineReadyMsg{err: err} }
+
+		// 3. Setup IPv6 Spoofer
+		spoofer6 := core.NewSpoofer6(fHandle, scanner.MyMAC, session)
 		
-		// 2. FILTER PACKETS.
+		// --- LAN FIX CONFIG ---
 		myIP := scanner.MyIP.String()
-		filter := fmt.Sprintf("arp or (ip and not dst host %s)", myIP)
-		
-		if err := fHandle.SetBPFFilter(filter); err != nil {
-			fmt.Println("BPF Error:", err)
-		}
+		// Filter BPF
+		filter := fmt.Sprintf("arp or icmp6 or (ip and not dst host %s)", myIP)
+		fHandle.SetBPFFilter(filter)
 		
 		forwarder := core.NewForwarder(fHandle, scanner.MyMAC, gwMAC, session)
 		stopChan := make(chan struct{})
-		return engineReadyMsg{spoofer: spoofer, forwarder: forwarder, stopChan: stopChan}
+		
+		return engineReadyMsg{
+			spoofer:   spoofer, 
+			spoofer6:  spoofer6,
+			forwarder: forwarder, 
+			stopChan:  stopChan,
+		}
 	}
 }
 

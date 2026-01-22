@@ -8,6 +8,7 @@ import (
 
 type TargetConfig struct {
 	IP        net.IP
+	IPv6      net.IP
 	MAC       net.HardwareAddr
 	Name      string
 	
@@ -15,7 +16,7 @@ type TargetConfig struct {
 	IsBlocked bool
 	LimitRate int64
 	
-	// ATOMIC STATS (Thread Safe)
+	// ATOMIC STATS
 	BytesUpTotal   int64
 	BytesDownTotal int64
 	
@@ -42,6 +43,7 @@ func NewSessionManager() *SessionManager {
 	}
 }
 
+// Update AddTarget to add IPv6 support
 func (sm *SessionManager) AddTarget(device Device, name string) {
 	sm.Mutex.Lock()
 	defer sm.Mutex.Unlock()
@@ -50,11 +52,16 @@ func (sm *SessionManager) AddTarget(device Device, name string) {
 	if _, exists := sm.Targets[key]; !exists {
 		sm.Targets[key] = &TargetConfig{
 			IP:        device.IP,
+			IPv6:      device.IPv6,
 			MAC:       device.MAC,
 			Name:      name,
 			IsBlocked: false,
 			LimitRate: 0,
 			LastCheck: time.Now(),
+		}
+	} else {
+		if len(device.IPv6) > 0 {
+			sm.Targets[key].IPv6 = device.IPv6
 		}
 	}
 }
@@ -75,9 +82,7 @@ func (sm *SessionManager) GetTargetByIP(ip net.IP) *TargetConfig {
 	sm.Mutex.RLock()
 	defer sm.Mutex.RUnlock()
 	for _, t := range sm.Targets {
-		if t.IP.Equal(ip) {
-			return t
-		}
+		if t.IP.Equal(ip) { return t }
 	}
 	return nil
 }
