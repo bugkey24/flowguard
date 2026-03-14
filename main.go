@@ -286,6 +286,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "]": if sel != nil { m.autoLimit(sel, 50) }
 			case "[": if sel != nil { m.autoLimit(sel, -50) }
 			case "0": if sel != nil { m.autoLimit(sel, -999999) }
+			case "t": // Toggle Stealth
+				if m.spoofer != nil {
+					m.spoofer.Stealth = !m.spoofer.Stealth
+					status := "ENABLED"
+					if !m.spoofer.Stealth { status = "DISABLED" }
+					m.addLog(fmt.Sprintf("🛡️  STEALTH MODE %s", status))
+				}
 			}
 		}
 
@@ -388,6 +395,12 @@ func (m model) View() string {
 
 		// Monitoring Section
 		var logContent strings.Builder
+		stealthStatus := "OFF"
+		if m.spoofer != nil && m.spoofer.Stealth { stealthStatus = "ON" }
+		
+		logContent.WriteString(fmt.Sprintf("   🕵️  STEALTH: %s | ⚡ WORKERS: 8\n", stealthStatus))
+		logContent.WriteString("   --------------------------------------\n")
+		
 		if len(m.logs) == 0 {
 			logContent.WriteString("   📡 Waiting for network events...")
 		} else {
