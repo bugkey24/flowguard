@@ -40,15 +40,17 @@ type TargetConfig struct {
 }
 
 type SessionManager struct {
-	Targets     map[string]*TargetConfig
-	IPtoTarget  map[string]*TargetConfig // [NEW] O(1) Lookup by IP
-	Mutex       sync.RWMutex
+	Targets      map[string]*TargetConfig
+	IPtoTarget   map[string]*TargetConfig // O(1) Lookup by IP
+	IPv6toTarget map[string]*TargetConfig // [NEW] O(1) Lookup by IPv6
+	Mutex        sync.RWMutex
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		Targets:    make(map[string]*TargetConfig),
-		IPtoTarget: make(map[string]*TargetConfig),
+		Targets:      make(map[string]*TargetConfig),
+		IPtoTarget:   make(map[string]*TargetConfig),
+		IPv6toTarget: make(map[string]*TargetConfig),
 	}
 }
 
@@ -72,9 +74,18 @@ func (sm *SessionManager) AddTarget(device Device, name string) {
 		}
 		sm.Targets[key] = t
 		sm.IPtoTarget[device.IP.String()] = t
-	} else {
 		if len(device.IPv6) > 0 {
+			sm.IPv6toTarget[device.IPv6.String()] = t
+		}
+	} else {
+		// If target already exists, update its IPv6 if provided
+		if len(device.IPv6) > 0 {
+			// If the existing target already had an IPv6, remove the old entry from the map
+			if len(sm.Targets[key].IPv6) > 0 && !sm.Targets[key].IPv6.Equal(device.IPv6) {
+				delete(sm.IPv6toTarget, sm.Targets[key].IPv6.String())
+			}
 			sm.Targets[key].IPv6 = device.IPv6
+			sm.IPv6toTarget[device.IPv6.String()] = sm.Targets[key]
 		}
 	}
 }
@@ -84,6 +95,9 @@ func (sm *SessionManager) RemoveTarget(mac string) {
 	defer sm.Mutex.Unlock()
 	if t, exists := sm.Targets[mac]; exists {
 		delete(sm.IPtoTarget, t.IP.String())
+		if len(t.IPv6) > 0 {
+			delete(sm.IPv6toTarget, t.IPv6.String())
+		}
 		delete(sm.Targets, mac)
 	}
 }
@@ -98,6 +112,12 @@ func (sm *SessionManager) GetTargetByIP(ip net.IP) *TargetConfig {
 	sm.Mutex.RLock()
 	defer sm.Mutex.RUnlock()
 	return sm.IPtoTarget[ip.String()]
+}
+
+func (sm *SessionManager) GetTargetByIPv6(ipv6 net.IP) *TargetConfig {
+	sm.Mutex.RLock()
+	defer sm.Mutex.RUnlock()
+	return sm.IPv6toTarget[ipv6.String()]
 }
 
 func (sm *SessionManager) GetAllTargets() []*TargetConfig {
