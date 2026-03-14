@@ -108,6 +108,7 @@ type model struct {
 	// UI Flags
 	skipTableUpdate bool 
 	logs            []string // [NEW] Monitoring Logs
+	lockdownMode    bool     // [NEW] Dynamic Lockdown Mode
 }
 
 // Messages
@@ -298,6 +299,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if !m.spoofer.Stealth { status = "DISABLED" }
 					m.addLog(fmt.Sprintf("🛡️  STEALTH MODE %s", status))
 				}
+			case "k": // Toggle Lockdown
+				m.lockdownMode = !m.lockdownMode
+				status := "ENABLED"
+				if !m.lockdownMode { status = "DISABLED" }
+				m.addLog(fmt.Sprintf("🔒 DYNAMIC LOCKDOWN %s", status))
 			case "m": // MONITOR DEVICE
 				if sel != nil {
 					m.selectedMAC = sel.MAC
@@ -321,8 +327,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case scanResultMsg:
-		// FIX DUPLICATION: Using Merge Unique IP
-		m.devices = mergeDevicesUniqueIP(m.devices, msg.devices)
+		// 1. IDENTITY MIGRATION & AUTO-BLOCK [NEW]
+		for _, d := range msg.devices {
+			macStr := d.MAC.String()
+			existingTarget := m.session.GetTarget(macStr)
+			
+			if existingTarget != nil {
+				// IP Migration: If MAC is known but IP changed
+				if !existingTarget.IP.Equal(d.IP) && !d.IP.IsUnspecified() && d.IP != nil {
+					oldIP := existingTarget.IP.String()
+					m.session.IPtoTarget[d.IP.String()] = existingTarget
+					existingTarget.IP = d.IP
+					m.addLog(fmt.Sprintf("🔄 IP MIGRATION: %s -> %s", oldIP, d.IP.String()))
+				}
+			} else if m.lockdownMode {
+				// Auto-Block: New device found during lockdown
+				if !isSafeDevice(&d, m) {
+					m.addToSession(&d)
+					if t := m.session.GetTarget(macStr); t != nil {
+						t.Mutex.Lock()
+						t.IsBlocked = true
+						t.Mutex.Unlock()
+						m.addLog(fmt.Sprintf("🔒 AUTO-BLOCKED NEW IDENTITY: %s", d.IP))
+					}
+				}
+			}
+		}
+
+		// Update device list
+		m.devices = mergeDevicesUniqueMAC(m.devices, msg.devices)
 		sortDevices(m.devices)
 		
 		m.scanner = msg.scanner
@@ -362,6 +395,8 @@ case engineReadyMsg:
 			updateSpeedometer(m.session)
 			if m.state == "running" {
 				m.refreshTable()
+				// Continuous Background Scan for Lockdown
+				return m, tea.Batch(tickCmd(), scanNetworkCmd(m.selectedIface))
 			}
 			return m, tickCmd()
 		}
@@ -441,9 +476,11 @@ func (m model) View() string {
 		var logContent strings.Builder
 		stealthStatus := "OFF"
 		if m.spoofer != nil && m.spoofer.Stealth { stealthStatus = "ON" }
+		lockdownStatus := "OFF"
+		if m.lockdownMode { lockdownStatus = "ON" }
 		
-		logContent.WriteString(fmt.Sprintf("   🕵️  STEALTH: %s | ⚡ WORKERS: 8\n", stealthStatus))
-		logContent.WriteString("   --------------------------------------\n")
+		logContent.WriteString(fmt.Sprintf("   🕵️  STEALTH: %s | ⚡ WORKERS: 8 | 🔒 LOCKDOWN: %s\n", stealthStatus, lockdownStatus))
+		logContent.WriteString("   ---------------------------------------------------\n")
 		
 		if len(m.logs) == 0 {
 			logContent.WriteString("   📡 Waiting for network events...")
@@ -562,6 +599,15 @@ func mergeDevicesUniqueIP(old, new []models.Device) []models.Device {
 	uniqueMap := make(map[string]models.Device)
 	for _, d := range old { uniqueMap[d.IP.String()] = d }
 	for _, d := range new { uniqueMap[d.IP.String()] = d }
+	var res []models.Device
+	for _, d := range uniqueMap { res = append(res, d) }
+	return res
+}
+
+func mergeDevicesUniqueMAC(old, new []models.Device) []models.Device {
+	uniqueMap := make(map[string]models.Device)
+	for _, d := range old { uniqueMap[d.MAC.String()] = d }
+	for _, d := range new { uniqueMap[d.MAC.String()] = d }
 	var res []models.Device
 	for _, d := range uniqueMap { res = append(res, d) }
 	return res

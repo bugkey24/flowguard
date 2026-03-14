@@ -73,6 +73,9 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 	handle, err := pcap.OpenLive(s.InterfaceName, 65536, true, pcap.BlockForever)
 	if err != nil { return nil, err }
 	defer handle.Close()
+	
+	// Enhanced Filter: ARP + DHCP
+	handle.SetBPFFilter("arp or (udp and (port 67 or port 68)) or ip6")
 
 	ip := s.MyIP.To4()
 	mask := net.CIDRMask(24, 32)
@@ -119,9 +122,6 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 					ip6, _ := ip6Layer.(*layers.IPv6)
 					eth, _ := ethLayer.(*layers.Ethernet)
 
-					if ip6.SrcIP.IsMulticast() || ip6.SrcIP.IsUnspecified() { continue }
-					if bytesEqual(eth.SrcMAC, s.MyMAC) { continue }
-
 					select {
 					case results <- models.Device{
 						IP: nil,
@@ -129,6 +129,35 @@ func (s *Scanner) Scan(ctx context.Context) ([]models.Device, error) {
 						MAC: eth.SrcMAC,
 					}:
 					case <-ctx.Done(): return
+					}
+				}
+
+				// 3. Check DHCP (Dynamic Discovery [NEW])
+				udpLayer := packet.Layer(layers.LayerTypeUDP)
+				if udpLayer != nil {
+					udp, _ := udpLayer.(*layers.UDP)
+					// DHCP Ports: 67 (Server), 68 (Client)
+					if udp.DstPort == 67 || udp.SrcPort == 68 {
+						dhcpLayer := packet.Layer(layers.LayerTypeDHCPv4)
+						if dhcpLayer != nil {
+							dhcp, _ := dhcpLayer.(*layers.DHCPv4)
+							// Get MAC and potential IP
+							mac := dhcp.ClientHWAddr
+							ip := dhcp.YourClientIP
+							if ip.IsUnspecified() {
+								ip = dhcp.ClientIP
+							}
+							
+							if len(mac) == 6 {
+								select {
+								case results <- models.Device{
+									IP:  ip,
+									MAC: net.HardwareAddr(mac),
+								}:
+								case <-ctx.Done(): return
+								}
+							}
+						}
 					}
 				}
 			}
