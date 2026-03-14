@@ -300,6 +300,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "m": // MONITOR DEVICE
 				if sel != nil {
+					m.selectedMAC = sel.MAC
 					m.state = "monitoring"
 					return m, nil
 				}
@@ -357,9 +358,11 @@ case engineReadyMsg:
 		return m, tickCmd()
 
 	case tickMsg:
-		if m.state == "running" {
+		if m.state == "running" || m.state == "monitoring" {
 			updateSpeedometer(m.session)
-			m.refreshTable()
+			if m.state == "running" {
+				m.refreshTable()
+			}
 			return m, tickCmd()
 		}
 	}
@@ -399,17 +402,25 @@ func (m model) View() string {
 		s.WriteString(helpStyle.Render("   [Enter: Save]  [Esc: Cancel]"))
 
 	case "monitoring":
-		sel := m.getSelectedDevice()
-		if sel == nil {
-			m.state = "running"
-			return m.View()
-		}
-		mac := sel.MAC.String()
+		mac := m.selectedMAC.String()
 		t := m.session.GetTarget(mac)
 		if t == nil {
 			s.WriteString("   " + roseStyle.Render("❌ Target not active in session."))
 			s.WriteString("\n\n" + helpStyle.Render("   [Esc: Back]"))
 			break
+		}
+		
+		var sel *models.Device
+		for _, d := range m.devices {
+			if d.MAC.String() == mac {
+				sel = &d
+				break
+			}
+		}
+		
+		if sel == nil {
+			m.state = "running"
+			return m.View()
 		}
 
 		t.Mutex.Lock()
@@ -650,7 +661,6 @@ func sortDevices(d []models.Device) {
 }
 
 func (m *model) getSelectedDevice() *models.Device {
-	if m.state != "running" { return nil }
 	row := m.table.SelectedRow()
 	if len(row) == 0 { return nil }
 	targetIP := net.ParseIP(row[0])
