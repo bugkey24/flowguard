@@ -202,22 +202,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// --- SCREEN 2: RENAME ---
-		if m.state == "renaming" {
+		// --- SCREEN 2: RENAME & MONITOR ---
+		if m.state == "renaming" || m.state == "monitoring" {
 			switch msg.Type {
-			case tea.KeyEnter:
-				utils.SaveAlias(m.selectedMAC.String(), m.textInput.Value())
-				m.aliases, _ = utils.LoadAliases()
-				m.state = "running"
-				m.refreshTable()
-				return m, nil
 			case tea.KeyEsc:
 				m.state = "running"
 				m.textInput.Blur()
 				return m, nil
+			case tea.KeyEnter:
+				if m.state == "renaming" {
+					utils.SaveAlias(m.selectedMAC.String(), m.textInput.Value())
+					m.aliases, _ = utils.LoadAliases()
+					m.state = "running"
+					m.refreshTable()
+					return m, nil
+				}
 			}
-			m.textInput, cmd = m.textInput.Update(msg)
-			return m, cmd
+			if m.state == "renaming" {
+				m.textInput, cmd = m.textInput.Update(msg)
+				return m, cmd
+			}
+			return m, nil
 		}
 
 		// --- SCREEN 3: MAIN DASHBOARD ---
@@ -292,6 +297,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					status := "ENABLED"
 					if !m.spoofer.Stealth { status = "DISABLED" }
 					m.addLog(fmt.Sprintf("🛡️  STEALTH MODE %s", status))
+				}
+			case "m": // MONITOR DEVICE
+				if sel != nil {
+					m.state = "monitoring"
+					return m, nil
 				}
 			}
 		}
@@ -388,6 +398,29 @@ func (m model) View() string {
 		s.WriteString("   " + m.textInput.View() + "\n\n")
 		s.WriteString(helpStyle.Render("   [Enter: Save]  [Esc: Cancel]"))
 
+	case "monitoring":
+		sel := m.getSelectedDevice()
+		if sel == nil {
+			m.state = "running"
+			return m.View()
+		}
+		mac := sel.MAC.String()
+		t := m.session.GetTarget(mac)
+		if t == nil {
+			s.WriteString("   " + roseStyle.Render("❌ Target not active in session."))
+			s.WriteString("\n\n" + helpStyle.Render("   [Esc: Back]"))
+			break
+		}
+
+		t.Mutex.Lock()
+		s.WriteString("   " + tealStyle.Render("📊 MONITORING: "+sel.IP.String()) + " (" + sel.Vendor + ")\n\n")
+		s.WriteString(fmt.Sprintf("   Speed:   ⬇️ %.1f KB/s | ⬆️ %.1f KB/s\n", t.DisplayDown/1024, t.DisplayUp/1024))
+		s.WriteString(fmt.Sprintf("   Traffic: 💻 TCP: %d | ⚡ UDP: %d | 🛡️ ICMP: %d\n", t.TCPCount, t.UDPCount, t.ICMPCount))
+		t.Mutex.Unlock()
+
+		s.WriteString("\n   " + roseStyle.Render("   [LIVE TELEMETRY ACTIVE]"))
+		s.WriteString("\n\n" + helpStyle.Render("   [Esc: Back to Dashboard]"))
+
 	case "running":
 		// Table View
 		s.WriteString(baseStyle.Render(m.table.View()))
@@ -413,8 +446,8 @@ func (m model) View() string {
 		s.WriteString("\n")
 
 		// Improved Help/Actions
-		s.WriteString("   " + helpStyle.Render("Actions: [S] Scan | [R] Rename | [B/U] Block/Unblock All | [L] Limit All"))
-		s.WriteString("\n   " + helpStyle.Render("Target:  [Enter] Toggle | [Space] Block | []/[]] Limit | [0] Reset"))
+		s.WriteString("   " + helpStyle.Render("Actions: [S] Scan | [R] Rename | [M] Monitor | [B/U] Block/Unblock All | [L] Limit All"))
+		s.WriteString("\n   " + helpStyle.Render("Target:  [Enter] Toggle | [Space] Block | []/[]] Limit | [0] Reset | [T] Stealth Toggle"))
 	}
 
 	return s.String()

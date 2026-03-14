@@ -109,6 +109,21 @@ func (f *Forwarder) processPacket(data []byte) {
 		return
 	}
 
+	// Protocol Detection [NEW]
+	if len(data) >= 23 {
+		proto := data[23]
+		target.Mutex.Lock()
+		switch proto {
+		case 6: // TCP
+			target.TCPCount++
+		case 17: // UDP
+			target.UDPCount++
+		case 1: // ICMP
+			target.ICMPCount++
+		}
+		target.Mutex.Unlock()
+	}
+
 	target.Mutex.Lock()
 
 	// BLOCK

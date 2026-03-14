@@ -32,6 +32,9 @@ type TargetConfig struct {
 	// Monitoring [NEW]
 	HistoryDown    []float64
 	HistoryUp      []float64
+	TCPCount       int64
+	UDPCount       int64
+	ICMPCount      int64
 	
 	Mutex sync.Mutex
 }
