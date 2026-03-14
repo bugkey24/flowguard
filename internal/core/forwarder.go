@@ -27,7 +27,7 @@ func NewForwarder(handle *pcap.Handle, myMAC, gatewayMAC net.HardwareAddr, sessi
 }
 
 func (f *Forwarder) StartForwarding(stopChan chan struct{}) {
-	limitTicker := time.NewTicker(100 * time.Millisecond)
+	limitTicker := time.NewTicker(20 * time.Millisecond) // Higher frequency for smoother limiting
 	defer limitTicker.Stop()
 
 	for {
@@ -39,7 +39,8 @@ func (f *Forwarder) StartForwarding(stopChan chan struct{}) {
 			targets := f.Session.GetAllTargets()
 			for _, t := range targets {
 				t.Mutex.Lock()
-				t.LimiterBucket = 0
+				// Token bucket depletion logic: 20ms refresh means divide rate by 50
+				t.LimiterBucket = 0 
 				t.Mutex.Unlock()
 			}
 
@@ -59,15 +60,13 @@ func (f *Forwarder) StartForwarding(stopChan chan struct{}) {
 			var target *models.TargetConfig
 			var isUpload bool
 			
-			activeTargets := f.Session.GetAllTargets()
-			
-			for _, t := range activeTargets {
-				if t.IP.Equal(srcIP) {
-					target = t; isUpload = true; break
-				}
-				if t.IP.Equal(dstIP) {
-					target = t; isUpload = false; break
-				}
+			// [NEW] O(1) Lookup
+			if t := f.Session.GetTargetByIP(srcIP); t != nil {
+				target = t
+				isUpload = true
+			} else if t := f.Session.GetTargetByIP(dstIP); t != nil {
+				target = t
+				isUpload = false
 			}
 
 			if target == nil { continue }
@@ -81,7 +80,10 @@ func (f *Forwarder) StartForwarding(stopChan chan struct{}) {
 			
 			// LIMIT
 			if target.LimitRate > 0 {
-				if target.LimiterBucket > (target.LimitRate / 10) {
+				refreshIntervalsPerSec := int64(50) // 1s / 20ms
+				maxBucketSize := target.LimitRate / refreshIntervalsPerSec
+				
+				if target.LimiterBucket > maxBucketSize {
 					target.Mutex.Unlock(); continue 
 				}
 				target.LimiterBucket += int64(len(data))

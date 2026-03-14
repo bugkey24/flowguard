@@ -29,17 +29,23 @@ type TargetConfig struct {
 	
 	LimiterBucket  int64
 	
+	// Monitoring [NEW]
+	HistoryDown    []float64
+	HistoryUp      []float64
+	
 	Mutex sync.Mutex
 }
 
 type SessionManager struct {
-	Targets map[string]*TargetConfig
-	Mutex   sync.RWMutex
+	Targets     map[string]*TargetConfig
+	IPtoTarget  map[string]*TargetConfig // [NEW] O(1) Lookup by IP
+	Mutex       sync.RWMutex
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		Targets: make(map[string]*TargetConfig),
+		Targets:    make(map[string]*TargetConfig),
+		IPtoTarget: make(map[string]*TargetConfig),
 	}
 }
 
@@ -50,7 +56,7 @@ func (sm *SessionManager) AddTarget(device Device, name string) {
 	
 	key := device.MAC.String()
 	if _, exists := sm.Targets[key]; !exists {
-		sm.Targets[key] = &TargetConfig{
+		t := &TargetConfig{
 			IP:        device.IP,
 			IPv6:      device.IPv6,
 			MAC:       device.MAC,
@@ -58,7 +64,11 @@ func (sm *SessionManager) AddTarget(device Device, name string) {
 			IsBlocked: false,
 			LimitRate: 0,
 			LastCheck: time.Now(),
+			HistoryDown: make([]float64, 0, 60),
+			HistoryUp:   make([]float64, 0, 60),
 		}
+		sm.Targets[key] = t
+		sm.IPtoTarget[device.IP.String()] = t
 	} else {
 		if len(device.IPv6) > 0 {
 			sm.Targets[key].IPv6 = device.IPv6
@@ -69,7 +79,10 @@ func (sm *SessionManager) AddTarget(device Device, name string) {
 func (sm *SessionManager) RemoveTarget(mac string) {
 	sm.Mutex.Lock()
 	defer sm.Mutex.Unlock()
-	delete(sm.Targets, mac)
+	if t, exists := sm.Targets[mac]; exists {
+		delete(sm.IPtoTarget, t.IP.String())
+		delete(sm.Targets, mac)
+	}
 }
 
 func (sm *SessionManager) GetTarget(mac string) *TargetConfig {
@@ -81,10 +94,7 @@ func (sm *SessionManager) GetTarget(mac string) *TargetConfig {
 func (sm *SessionManager) GetTargetByIP(ip net.IP) *TargetConfig {
 	sm.Mutex.RLock()
 	defer sm.Mutex.RUnlock()
-	for _, t := range sm.Targets {
-		if t.IP.Equal(ip) { return t }
-	}
-	return nil
+	return sm.IPtoTarget[ip.String()]
 }
 
 func (sm *SessionManager) GetAllTargets() []*TargetConfig {

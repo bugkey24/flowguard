@@ -25,24 +25,56 @@ import (
 
 // --- STYLES ---
 var (
+	accentColor = lipgloss.Color("#7D56F4")
+	roseColor   = lipgloss.Color("#F43F5E")
+	tealColor   = lipgloss.Color("#10B981")
+	goldColor   = lipgloss.Color("#FFD700")
+
+	tealStyle = lipgloss.NewStyle().Foreground(tealColor).Bold(true)
+	goldStyle = lipgloss.NewStyle().Foreground(goldColor)
+	roseStyle = lipgloss.NewStyle().Foreground(roseColor)
+
 	baseStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(lipgloss.Color("240")).
+			Margin(0, 1)
 
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FAFAFA")).
-			Background(lipgloss.Color("#7D56F4")).
-			Padding(0, 1).
-			Width(60).
+			Background(accentColor).
+			Padding(0, 2).
+			Height(1).
 			Align(lipgloss.Center)
 
-	inputBoxStyle = lipgloss.NewStyle().
+	bannerStyle = lipgloss.NewStyle().
+			Foreground(accentColor).
+			Bold(true).
+			Margin(1, 0, 1, 4)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Margin(0, 2)
+
+	logStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#FFD700")).
-			Padding(1, 2).
-			Width(50)
+			BorderForeground(lipgloss.Color("238")).
+			Margin(0, 1). // Reduced margin
+			Padding(0, 1).
+			Height(5).
+			Width(90)
 )
+
+const banner = `
+  ______   _                                                _ 
+ |  ____| | |                                              | |
+ | |__    | |   ___   __      __   __ _   _   _    __ _   _ __   __| |
+ |  __|   | |  / _ \  \ \ /\ / /  / _' | | | | |  / _' | | '__| / _' |
+ | |      | | | (_) |  \ V  V /  | (_| | | |_| | | (_| | | |   | (_| |
+ |_|      |_|  \___/    \_/\_/    \__, |  \__,_|  \__,_| |_|    \__,_|
+                                   __/ |                              
+                                  |___/                               
+`
 
 // --- MODEL ---
 type model struct {
@@ -75,6 +107,7 @@ type model struct {
 	
 	// UI Flags
 	skipTableUpdate bool 
+	logs            []string // [NEW] Monitoring Logs
 }
 
 // Messages
@@ -216,6 +249,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "l": // LIMIT ALL
 				m.activateAllDevices()
 				m.session.LimitAll(50) // 50 KB/s
+				m.addLog("⚠️ ALL DEVICES LIMITED TO 50KB/s")
 				m.refreshTable()
 			
 			// --- SINGLE ACTIONS ---
@@ -243,6 +277,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Toggle Status
 					t.Mutex.Lock()
 					t.IsBlocked = !t.IsBlocked
+					status := "BLOCKED"
+					if !t.IsBlocked { status = "UNBLOCKED" }
+					m.addLog(fmt.Sprintf("🛡️  DEVICE %s %s", t.IP, status))
 					t.Mutex.Unlock()
 					m.refreshTable()
 				}
@@ -320,30 +357,54 @@ case engineReadyMsg:
 }
 
 func (m model) View() string {
-	s := "\n" + headerStyle.Render("FLOWGUARD PRO - NETWORK CONTROLLER") + "\n\n"
-	if m.err != nil { return fmt.Sprintf("CRITICAL ERROR: %v\nPress q to quit", m.err) }
+	if m.err != nil {
+		return fmt.Sprintf("\n  ❌ CRITICAL ERROR: %v\n  Press q to quit", m.err)
+	}
+
+	var s strings.Builder
+	s.WriteString(bannerStyle.Render(banner))
+	s.WriteString("\n")
 
 	switch m.state {
 	case "iface_select":
-		s += " 🔌 SELECT NETWORK INTERFACE:\n"
-		s += " (Select the active LAN or WiFi Adapter)\n\n"
-		s += baseStyle.Render(m.ifaceTable.View()) + "\n\n"
-		s += " [UP/DOWN: Select] [ENTER: Select] [Q: Quit]"
+		s.WriteString("   " + tealStyle.Render("🔌 SELECT NETWORK INTERFACE") + "\n")
+		s.WriteString("   (Choose the active adapter to begin monitoring)\n\n")
+		s.WriteString(baseStyle.Render(m.ifaceTable.View()))
+		s.WriteString("\n\n" + helpStyle.Render("   [Enter: Select]  [Q: Quit]"))
 
 	case "scanning":
-		s += " 🔍 Scanning network... Please wait.\n"
-		
+		s.WriteString("   " + goldStyle.Render("🔍 Scanning network... Please wait...") + "\n")
+
 	case "renaming":
-		s += " ✏️  RENAME DEVICE:\n" + fmt.Sprintf("    MAC: %s\n\n", m.selectedMAC)
-		s += inputBoxStyle.Render(m.textInput.View()) + "\n\n [Enter: Save] [Esc: Cancel]"
-		
+		s.WriteString("   " + tealStyle.Render("✏️  RENAME DEVICE") + "\n")
+		s.WriteString(fmt.Sprintf("   MAC: %s\n\n", m.selectedMAC))
+		s.WriteString("   " + m.textInput.View() + "\n\n")
+		s.WriteString(helpStyle.Render("   [Enter: Save]  [Esc: Cancel]"))
+
 	case "running":
-		s += baseStyle.Render(m.table.View()) + "\n\n"
-		s += " [ENTER]: Toggle Active | [S]: Rescan | [R]: Rename\n"
-		s += " Global: [B]: Block ALL | [U]: Unblock ALL | [L]: Limit ALL (50K)\n"
-		s += " Target: [SPACE]: Block | [ ] ]: +Limit | [ [ ]: -Limit | [0]: Reset"
+		// Table View
+		s.WriteString(baseStyle.Render(m.table.View()))
+		s.WriteString("\n\n")
+
+		// Monitoring Section
+		var logContent strings.Builder
+		if len(m.logs) == 0 {
+			logContent.WriteString("   📡 Waiting for network events...")
+		} else {
+			for _, l := range m.logs {
+				logContent.WriteString("   " + l + "\n")
+			}
+		}
+		
+		s.WriteString(logStyle.Render(logContent.String()))
+		s.WriteString("\n")
+
+		// Improved Help/Actions
+		s.WriteString("   " + helpStyle.Render("Actions: [S] Scan | [R] Rename | [B/U] Block/Unblock All | [L] Limit All"))
+		s.WriteString("\n   " + helpStyle.Render("Target:  [Enter] Toggle | [Space] Block | []/[]] Limit | [0] Reset"))
 	}
-	return s
+
+	return s.String()
 }
 
 // --- HELPER LOGIC ---
@@ -400,6 +461,7 @@ func (m *model) addToSession(d *models.Device) {
 		name := m.aliases[mac]
 		if name == "" { name = d.Vendor }
 		m.session.AddTarget(*d, name)
+		m.addLog(fmt.Sprintf("🎯 ADDED TARGET: %s (%s)", d.IP, name))
 	}
 
 	// 2. [BURST ATTACK]
@@ -431,6 +493,13 @@ func isSafeDevice(d *models.Device, m model) bool {
 	return d.IP.Equal(m.gatewayIP) || d.IP.Equal(m.scanner.MyIP)
 }
 
+func (m *model) addLog(msg string) {
+	m.logs = append(m.logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg))
+	if len(m.logs) > 5 {
+		m.logs = m.logs[1:]
+	}
+}
+
 // Anti-Duplication with IP Map
 func mergeDevicesUniqueIP(old, new []models.Device) []models.Device {
 	uniqueMap := make(map[string]models.Device)
@@ -450,8 +519,18 @@ func updateSpeedometer(sm *models.SessionManager) {
 		currDown := atomic.LoadInt64(&t.BytesDownTotal)
 		duration := now.Sub(t.LastCheck).Seconds()
 		if duration > 0 {
-			t.DisplayUp = float64(currUp - t.LastBytesUp) / duration
-			t.DisplayDown = float64(currDown - t.LastBytesDown) / duration
+			t.DisplayUp = float64(currUp-t.LastBytesUp) / duration
+			t.DisplayDown = float64(currDown-t.LastBytesDown) / duration
+
+			// Push to history
+			t.HistoryUp = append(t.HistoryUp, t.DisplayUp)
+			if len(t.HistoryUp) > 60 {
+				t.HistoryUp = t.HistoryUp[1:]
+			}
+			t.HistoryDown = append(t.HistoryDown, t.DisplayDown)
+			if len(t.HistoryDown) > 60 {
+				t.HistoryDown = t.HistoryDown[1:]
+			}
 		}
 		t.LastBytesUp = currUp
 		t.LastBytesDown = currDown
@@ -510,7 +589,7 @@ func setupEngineCmd(scanner *core.Scanner, gwIP net.IP, session *models.SessionM
 	}
 }
 
-func tickCmd() tea.Cmd { return tea.Tick(1*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }) }
+func tickCmd() tea.Cmd { return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) }) }
 
 func sortDevices(d []models.Device) {
 	sort.Slice(d, func(i, j int) bool {
@@ -558,7 +637,7 @@ func (m *model) cleanup() {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel())
+	p := tea.NewProgram(initialModel(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)

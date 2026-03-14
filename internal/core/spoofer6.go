@@ -52,7 +52,7 @@ func (s *Spoofer6) attackRoutine() {
 	targets := s.Session.GetAllTargets()
 	for _, t := range targets {
 		if len(t.IPv6) > 0 && t.IsBlocked {
-			go s.sendNeighborAdvertisement(t.IPv6, t.MAC)
+			s.sendNeighborAdvertisement(t.IPv6, t.MAC)
 		}
 	}
 }
